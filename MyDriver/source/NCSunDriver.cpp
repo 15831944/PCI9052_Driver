@@ -227,7 +227,7 @@ void DpcForIsr(PKDPC Dpc,PDEVICE_OBJECT fdo,PIRP Irp,PVOID Context)
 
 /************************************************************************
 * 函数名称:OnInterrupt
-* 功能描述:PCI中断响应函数，用以通过激发内核模式的同步事件来启动译码线程
+* 功能描述:PCI中断响应函数，用以通过激发内核模式的同步事件来启动译码线程，电脑运行卡是因为中断吗？
 * 参数列表:
 		  InterruptObject:中断对象
 		  pdx:设备扩展
