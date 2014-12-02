@@ -4,6 +4,7 @@
 	Version="9.00"
 	Name="Test"
 	ProjectGUID="{405026BB-4E0A-41F2-B0F1-C9424A9C2886}"
+	RootNamespace="Test"
 	TargetFrameworkVersion="0"
 	>
 	<Platforms>
@@ -69,6 +70,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
+				AdditionalDependencies="Setupapi.lib"
 				OutputFile=".\Release/Test.exe"
 				LinkIncremental="1"
 				SuppressStartupBanner="true"

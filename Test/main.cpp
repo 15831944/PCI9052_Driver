@@ -26,9 +26,9 @@ int main()
 	Load_NC_TapeParameter_Program(hDevice,TapePara,NULL,16);
 	printf("Writing Completed\n");
 
-	ReadAddr = 0xa00104c8;
-	DspMemRead(hDevice,&ReadAddr,MemRead,16);
-	printf("Reading Completed:%x,%x,%x,%x\n",MemRead[0],MemRead[1],MemRead[2],MemRead[3]);
+	//ReadAddr = 0xa00104c8;
+	//DspMemRead(hDevice,&ReadAddr,MemRead,16);
+	//printf("Reading Completed, the data is:%x,%x,%x,%x\n",MemRead[0],MemRead[1],MemRead[2],MemRead[3]);
 
 	CloseHandle(hDevice);
 	getchar();

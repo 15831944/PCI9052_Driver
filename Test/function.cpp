@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <setupapi.h>
 #include <stdio.h>
 #include <winioctl.h>
 #include "function.h"
@@ -73,7 +74,7 @@ int Load_NC_TapeParameter_Program(HANDLE handle,LPVOID offset,UCHAR *buff,ULONG 
 
 	if(bResult==FALSE)
 	{
-		printf("can not get i/o data in fuction Load_NC_TapeParameter_Program");
+		printf("can not get i/o data in fuction Load_NC_TapeParameter_Program \n");
 		return 1;
 	}	
 	return 0;
@@ -95,7 +96,7 @@ int DspMemRead(HANDLE handle,LPVOID offset,LPVOID buff,ULONG length)
 
 	if(bResult==FALSE)
 	{
-		printf("can not Read");
+		printf("can not Read \n");
 		return 1;
 	}
 	return 0;

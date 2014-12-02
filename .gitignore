@@ -1,0 +1,10 @@
+*.htm
+*.obj
+*.dep
+*.exe
+*.manifest
+*.res
+*.ilk
+*.pdb
+*.idb
+*.[ao]

@@ -8,6 +8,7 @@
 #include "NCSunDriverGuid.h"
 #include "NCSunDriverIoctls.h"
 
+
 /************************************************************************
 * 函数名称:DriverEntry
 * 功能描述:NC_PCI_SUN板驱动程序的入口函数，初始化驱动程序，定位和申请硬件资源，创建内核对象
@@ -93,8 +94,10 @@ NTSTATUS NCDriverAddDevice(IN PDRIVER_OBJECT DriverObject,
 	pdx->uPnpStateFlag=1;
 	//表明共享内存尚未建立，此时不允许对共享内存区进行读写操作
 	pdx->bParaShmCreat=FALSE;
-	
-
+#ifdef	DECODE_INCLUDE
+	//初始化同步事件,初始状态为未激发态
+	KeInitializeEvent(&pdx->DecodeEvent,NotificationEvent,FALSE);
+#endif
 	KdPrint(("Leave NCDriverAddDevice\n"));
 	return STATUS_SUCCESS;
 }
@@ -183,16 +186,15 @@ NTSTATUS NCDriverRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 {
 	PAGED_CODE();
 	//KdPrint(("Enter IODriverRemoveDevice\n"));
-	Irp->IoStatus.Status = STATUS_SUCCESS;
-	//调用底层PCI驱动完成总线设备删除的一般性操作
-	NTSTATUS status = DefaultPnpHandler(pdx, Irp);
-	//	KdPrint(("Leave HandleRemoveDevice\n"));
 
 	//关闭设备接口，此时用户和其他驱动将不能再使用此驱动
 	IoSetDeviceInterfaceState(&pdx->InterfaceName, FALSE);
 	//释放存放设备接口符号链接名（本链接存放在动态申请的内存中）
 	RtlFreeUnicodeString(&pdx->InterfaceName);
-	
+#ifdef INTERRUPT_INCLUDE
+	//断开中断连接，不在响应PCI中断                        
+	IoDisconnectInterrupt(pdx->InterruptObject);
+#endif
 	//表明共享内存尚未建立，此时不允许对共享内存区进行读写操作
 	pdx->bParaShmCreat=FALSE;
 
@@ -203,7 +205,10 @@ NTSTATUS NCDriverRemoveDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
     IoDeleteDevice(pdx->fdo);
 	pdx->uPnpStateFlag=0;
 
-	
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	//调用底层PCI驱动完成总线设备删除的一般性操作
+	NTSTATUS status = DefaultPnpHandler(pdx, Irp);
+	//	KdPrint(("Leave HandleRemoveDevice\n"));
 	return status;
 }
 
@@ -233,20 +238,152 @@ void DpcForIsr(PKDPC Dpc,PDEVICE_OBJECT fdo,PIRP Irp,PVOID Context)
 		  pdx:设备扩展
 * 返回 值:返回状态
 *************************************************************************/
+#ifdef INTERRUPT_INCLUDE
 #pragma LOCKEDCODE
 BOOLEAN OnInterrupt(PKINTERRUPT InterruptObject, PDEVICE_EXTENSION pdx)
 {
-	//	KdPrint(("Entering PCI Interrupt!!!\n"));
-	//检查中断源
-	//激活同步事件以启动译码线程
-	//KeSetEvent();
+	ULONG	RegisterValue;
+	ULONG	Address;
 
-	//如果今后中断处理程序变得复杂，则可以通过使能下面代码调用与fdo相关联的DPC例程，须在NCDriverAddDevice中启用
-	//	IoRequestDpc(pdx->fdo, NULL, pdx);
+	Address = (ULONG)((PDEVICE_EXTENSION)pdx)->pPCI9052Mem;
 
-	return TRUE;
+	// Read interrupt status register
+	RegisterValue = READ_REGISTER_ULONG((ULONG *)(Address + 0x4c/4));
+
+	// Check for master PCI interrupt enable
+	if ((RegisterValue & 0x40) == 0)
+	{
+		return FALSE;		//如果不是该设备的中断,必须返回FALSE，否则系统会出问题。
+	}
+
+	// Check to see if an interrupt is active
+	if (RegisterValue & 0x4/4) //Only LINTi1 is used.
+	{		
+		////if (pdx->pWaitEvent != NULL)
+		////	KeSetEvent(pdx->pWaitEvent, 0, FALSE);	//通知应用程序，中断的到来
+		//在此，处理中断
+		RegisterValue &= (~0x40);
+		WRITE_REGISTER_ULONG((PULONG)Address + 0x4c/4,RegisterValue);   //屏蔽中断
+		RegisterValue |= 0x400;
+		WRITE_REGISTER_ULONG((PULONG)Address + 0x4c/4,RegisterValue);   //清零中断事件
+#ifdef DECODE_INCLUDE
+		KeSetEvent(pdx->pDecodeEvent, IO_NO_INCREMENT,FALSE);
+#endif
+		WRITE_REGISTER_ULONG((PULONG)pdx->pHPIC,0X00050005);    //reset HINT 位
+		RegisterValue |= 0x40;
+		WRITE_REGISTER_ULONG((PULONG)Address + 0x4c/4,RegisterValue); //设置中断有效
+		//如果不能很快处理，则交给Dpc处理，如下：
+		/*	PDEVICE_OBJECT fdo	= ((PDEVICE_EXTENSION)pdx)->pDeviceObject;
+		if (fdo != NULL)
+		{
+		PIRP pIrp			= fdo->CurrentIrp;
+		if (pIrp != NULL)
+		{
+		//如果今后中断处理程序变得复杂，则可以通过使能下面代码调用与fdo相关联的DPC例程，须在NCDriverAddDevice中启用
+		//	IoRequestDpc(pdx->fdo, NULL, pdx);
+		IoRequestDpc(fdo, pIrp, (PVOID)pdx);
+		}
+		}
+		*/
+		return TRUE;	//如果是该设备的中断，必须返回TRUE。
+	}
+
+	// If we reach here, then the interrupt is not ours
+	return FALSE;
 }
 
+/******************************************************************************
+*
+* Function   :  LockDevice
+*
+* Description:  Lock a device for operation, return FALSE if device is being
+*               removed.
+*
+******************************************************************************/
+BOOLEAN LockDevice(IN DEVICE_EXTENSION *pdx)
+{												//LockDevice
+
+	// Increment use count on our device object
+	InterlockedIncrement(&pdx->UsageCount);
+
+	//	DebugPrint("PCI9052Demo: Locking...");
+	/* 
+	If device is about to be removed, restore the use count and return FALSE.
+	If a race exists with HandleRemoveDevice (maybe running on another CPU),
+	the sequence we've followed is guaranteed to avoid a mistaken deletion of
+	the device object. If we test "removing" after HandleRemoveDevice sets 
+	it, we'll restore the use count and return FALSE. In the meantime, if
+	HandleRemoveDevice decremented count to 0 before we did our increment,
+	its thread will have set the remove event. Otherwise, we'll decrement to
+	0 and set the event. Either way, HandleRemoveDevice will wake up to 
+	finish removing the device, and we'll return FALSE to our caller.
+
+	If, on the other hand, we test "removing" before HandleRemoveDevice sets
+	it, we'll have already incremented the use count past 1 and will return 
+	TRUE. Our caller will eventually call UnlockDevice, which will decrement
+	the use count and might set the event HandleRemoveDevice is waiting on at
+	that point.
+	*/
+	if (pdx->bStopping)
+	{
+		// Stopping device
+		if (InterlockedDecrement(&pdx->UsageCount) == 0)
+			KeSetEvent(&pdx->StoppingEvent,0,FALSE);
+		return FALSE;
+	}
+	//	DebugPrint("PCI9052Demo is locked.");
+	return TRUE;
+}	
+
+
+/******************************************************************************
+*
+* Function   :  UnlockDevice
+*
+* Description:  Unlock a device.
+*
+******************************************************************************/
+VOID UnlockDevice(IN DEVICE_EXTENSION *pdx)
+{												//UnlockDevice
+	LONG UsageCount = InterlockedDecrement(&pdx->UsageCount);
+
+	//	DebugPrint("PCI9052Demo is unlocking...");
+
+	KdPrint(("PCI9052Demo: UNLOCKING... (usage = %d)\n", UsageCount));
+
+	if (UsageCount == 0)
+	{
+		// Stopping device
+		KeSetEvent(&pdx->StoppingEvent,0,FALSE);
+	}
+	//	DebugPrint("PCI9052Demo is unlocked.");
+
+}	
+/*********************************************************************
+*
+* Function   :  EnablePciInterrupt
+*
+* Description:  Enables the PLX Chip PCI Interrupt
+*
+**********************************************************************/
+BOOLEAN EnablePciInterrupt(IN PDEVICE_EXTENSION pdx)
+{												//EnablePciInterrupt
+	ULONG RegInterrupt;
+	ULONG Address;
+
+	LockDevice(pdx);
+
+	Address=(ULONG)pdx->pPCI9052Mem;
+	RegInterrupt = READ_REGISTER_ULONG((ULONG *)(Address + 0x4c));
+	RegInterrupt |= 0x40;
+	WRITE_REGISTER_ULONG((ULONG *)(Address +0x4c),RegInterrupt);
+
+	UnlockDevice(pdx);
+
+	return TRUE;
+}	
+
+#endif
 
 /************************************************************************
 * 函数名称:InitNCBoard
@@ -263,6 +400,11 @@ NTSTATUS InitNCBoard(IN PDEVICE_EXTENSION pdx,IN PCM_PARTIAL_RESOURCE_LIST list)
 	PAGED_CODE();
 
 	PDEVICE_OBJECT fdo = pdx->fdo;
+
+	BOOLEAN gotmem1 = FALSE;
+	BOOLEAN gotmem2 = FALSE;
+
+#ifdef INTERRUPT_INCLUDE
 	//暂存从PCI驱动处获得的中断信息所使用的变量
 	ULONG vector;
 	KIRQL irql;
@@ -270,12 +412,14 @@ NTSTATUS InitNCBoard(IN PDEVICE_EXTENSION pdx,IN PCM_PARTIAL_RESOURCE_LIST list)
 	KAFFINITY affinity;
 	BOOLEAN irqshare;
 	BOOLEAN gotinterrupt = FALSE;
+#endif	
 
-	//PHYSICAL_ADDRESS portbase;
+#ifdef PCI9052_IOINCLUDE
+	PHYSICAL_ADDRESS portbase;
 	BOOLEAN gotport = FALSE;
+#endif	
 
 	//保存资源描述表的首地址
-	//pdx->pIoBase = 0;
 	pdx->pHPIC = 0;
 	pdx->pHPIA = 0;
 	pdx->pHPIDIncrease = 0;
@@ -286,6 +430,7 @@ NTSTATUS InitNCBoard(IN PDEVICE_EXTENSION pdx,IN PCM_PARTIAL_RESOURCE_LIST list)
 	
 	for (ULONG i = 0; i < uNumRes; i++,resource++)
 	{
+		//KdPrint(("The reource type is %d, the length is %x \n",resource->Type,resource->u.Memory.Length));
 		switch (resource->Type)
 		{
 		case CmResourceTypeMemory:
@@ -300,16 +445,40 @@ NTSTATUS InitNCBoard(IN PDEVICE_EXTENSION pdx,IN PCM_PARTIAL_RESOURCE_LIST list)
 					resource->u.Memory.Length,
 					MmNonCached);
 
-				pdx->pHPIA = pdx->pHPIC + 4;
-				pdx->pHPIDIncrease = pdx->pHPIC + 8;
-				pdx->pHPIDStatic = pdx->pHPIC + 12;
-
+				pdx->pHPIA = pdx->pHPIC + 4/4;
+				pdx->pHPIDIncrease = pdx->pHPIC + 8/4;
+				pdx->pHPIDStatic = pdx->pHPIC + 12/4;
+				gotmem1 = TRUE;
 				//初始化HPI控制寄存器HWOB
 				WRITE_REGISTER_ULONG((PULONG)pdx->pHPIC,0X00010001);
 			}
+#ifdef PCI9052_MEMINCLUDE
+			else if (resource->u.Memory.Length == pdx->ulPCI9052MemLen)
+			{
+				KdPrint(("PCI9052Mem BASE ADDRESS X%X\n",resource->u.Memory.Start));
+				pdx->pPCI9052Mem = (PULONG)MmMapIoSpace(resource->u.Memory.Start,resource->u.Memory.Length,MmNonCached);
+				gotmem2 = TRUE;
+					
+				// Read interrupt status register 事实证明偏移地址要除4
+				//KdPrint(("The content of PCI9052Mem is %x \n",READ_REGISTER_ULONG(pdx->pPCI9052Mem + 0x2c/4)));
+				
+			}
+#endif	
 			break;
 
-			////case CmResourceTypePort:
+#ifdef PCI9052_IOINCLUDE
+			case CmResourceTypePort:
+				//PCI9052内部的寄存器占用一个IO资源和Mem资源，可以不用IO资源
+				if(resource->u.Port.Length == pdx->ulPCI9052IOLen)
+				{
+					KdPrint(("PCI9052IO BASE ADDRESS X%X\n",resource->u.Port.Start));
+					portbase = resource->u.Port.Start;
+					//pdx->ulPCI9052IOLen = resource->u.Port.Length;
+					pdx->mappedport = (resource->Flags & CM_RESOURCE_PORT_IO) == 0;
+					gotport = TRUE;
+				}
+				break;
+#endif
 			////	//I/O端口资源
 			////	//KdPrint(("I/O resource type %d\n", resource->Type));
 			////	if(resource->u.Port.Length==pdx->ulHPICLen)
@@ -422,30 +591,55 @@ NTSTATUS InitNCBoard(IN PDEVICE_EXTENSION pdx,IN PCM_PARTIAL_RESOURCE_LIST list)
 			////		}
 			////	}
 			////	break;
-
+#ifdef INTERRUPT_INCLUDE
 			case CmResourceTypeInterrupt:
 				//把从下层PCI总线处获得的中断信息保存在临时变量中
 
-				irql = (KIRQL) resource->u.Interrupt.Level;
-				vector = resource->u.Interrupt.Vector;
-				affinity = resource->u.Interrupt.Affinity;
-				mode = (resource->Flags == CM_RESOURCE_INTERRUPT_LATCHED) ? Latched : LevelSensitive;
-				irqshare = (resource->ShareDisposition == CmResourceShareShared);
-				gotinterrupt = TRUE;
+				irql = (KIRQL) resource->u.Interrupt.Level;		//获得中断请求级
+				vector = resource->u.Interrupt.Vector;			//获得中断向量
+				affinity = resource->u.Interrupt.Affinity;		//获取CPU亲缘关系
+				mode = (resource->Flags == CM_RESOURCE_INTERRUPT_LATCHED) ? Latched : LevelSensitive;		//获得中断模式
+				irqshare = (resource->ShareDisposition == CmResourceShareShared);							//判断是否需要共享中断
+				gotinterrupt = TRUE;			//表示已经得到中断
 				break;
-
+#endif
 			default:
 				KdPrint(("Unexpected I/O resource type %d\n", resource->Type));
 				break;
 		} //switch (resource->Type)
 	} //for (ULONG i = 0; i < uNumRes; i++,resource++)
 
-	if ((pdx->pHPIC==0)||(gotinterrupt==FALSE))
+	if ((gotmem1 == FALSE)
+#ifdef PCI9052_MEMINCLUDE
+		||(gotmem2 == FALSE)
+#endif	
+#ifdef PCI9052_IOINCLUDE
+		||(gotport == FALSE)
+#endif
+#ifdef INTERRUPT_INCLUDE
+		||(gotinterrupt==FALSE)
+#endif	
+		)
 	{
 		KdPrint((" Didn't get expected Memory resources\n"));
 		return STATUS_DEVICE_CONFIGURATION_ERROR;
 	}
+#ifdef PCI9052_IOINCLUDE
+	//判断是否需要I/O端口映射
+	if (pdx->mappedport)
+	{
+		pdx->pPCI9052IO = (PULONG)MmMapIoSpace(portbase, pdx->ulPCI9052IOLen,MmNonCached);
+		if (!pdx->mappedport)
+		{
+			KdPrint(("Unalbe to map port range %I64X, length %X\n",portbase,pdx->ulPCI9052IOLen));
+			return STATUS_INSUFFICIENT_RESOURCES;
+		}
+	}
+	else
+		pdx->pPCI9052IO = (PULONG) portbase.QuadPart;
+#endif
 
+#ifdef INTERRUPT_INCLUDE
 	//连接中断并使能
 	NTSTATUS status = IoConnectInterrupt(&pdx->InterruptObject, (PKSERVICE_ROUTINE) OnInterrupt,(PVOID) pdx, NULL, vector, irql, irql, LevelSensitive, TRUE, affinity, FALSE);
 
@@ -455,8 +649,22 @@ NTSTATUS InitNCBoard(IN PDEVICE_EXTENSION pdx,IN PCM_PARTIAL_RESOURCE_LIST list)
 		KdPrint(("IoConnectInterrupt failed - %X\n", status));
 		return status;
 	}
+	//下面这段程序会导致蓝屏，原因待查
+	////else
+	////{	// Re-enable the PCI Interrupt
+	////	KdPrint(("OK, Let's enable interrupt."));
+	////	if (pdx->InterruptObject == NULL)
+	////	{
+	////		KdPrint(("Interrupt object is NULL."));
+	////	}
+	////	//同步Enable interrupt.
+	////	KeSynchronizeExecution(pdx->InterruptObject,(PKSYNCHRONIZE_ROUTINE)EnablePciInterrupt,pdx);
+	////	KdPrint(("Have Enabled Interrupt."));
+	////}
+#endif
 
-	
+	pdx->GotResource = TRUE;
+
 	return STATUS_SUCCESS;	
 }
 
@@ -714,7 +922,7 @@ NTSTATUS CompleteRequest(IN PIRP Irp, IN NTSTATUS status, IN ULONG_PTR info)
 DriverObject:驱动对象
 * 返回 值:返回状态
 *************************************************************************/
-#pragma 
+#pragma PAGEDCODE
 void C6x_Write_Word(PULONG Hpic_adr,PULONG Hpia_adr,PULONG Hpid_Noincrement_adr,
 					ULONG Source_adr,ULONG Source_data)
 {
@@ -759,6 +967,7 @@ void C6x_Write_Word(PULONG Hpic_adr,PULONG Hpia_adr,PULONG Hpid_Noincrement_adr,
 DriverObject:驱动对象
 * 返回 值:返回状态
 *************************************************************************/
+#pragma PAGEDCODE
 void C6x_Write_NoIncreament_Section(PULONG Hpic_adr,PULONG Hpia_adr,
 	PULONG Hpid_Noincrement_adr,ULONG Source_adr,PULONG Source_data,ULONG length)
 {
@@ -805,6 +1014,7 @@ void C6x_Write_NoIncreament_Section(PULONG Hpic_adr,PULONG Hpia_adr,
 DriverObject:驱动对象
 * 返回 值:返回状态
 *************************************************************************/
+#pragma PAGEDCODE
 void C6x_Write_Increment_Section(PULONG Hpic_adr,PULONG Hpia_adr,PULONG Hpid_increment_adr,
 			PULONG Hpid_Noincrement_adr,ULONG Source_adr,PULONG Source_data,ULONG length)
 {
@@ -864,8 +1074,10 @@ NTSTATUS NCDriverDeviceControl(PDEVICE_OBJECT fdo, PIRP Irp)
 	ULONG val1;
 	LP_NC_FPGA_stru pInBuf;
 	
-	PULONG PUhpidata,PUdecodedata,PUTapeParameterData,OutputBuffer;
-
+	PULONG PUhpidata,PUTapeParameterData,OutputBuffer;
+#ifdef DECODE_INCLUDE
+	PULONG PUdecodedata;
+#endif
 	//unsigned int temp;
 	ULONG i,j;
 	//int datasize;
@@ -980,6 +1192,7 @@ NTSTATUS NCDriverDeviceControl(PDEVICE_OBJECT fdo, PIRP Irp)
 				DSP_TAPEPARAMETER_BASE_ADR,PUTapeParameterData,uInBufLen/4);
 			info = uOutBufLen;
 			break;
+#ifdef DECODE_INCLUDE
 		case NC_TRANSMIT_EVENT:
 			KdPrint(("get into event test\n"));
 			pdx->hUserDecodeEvent = *(HANDLE*)Irp->AssociatedIrp.SystemBuffer;
@@ -995,7 +1208,7 @@ NTSTATUS NCDriverDeviceControl(PDEVICE_OBJECT fdo, PIRP Irp)
 			info = uInBufLen;
 			KdPrint((" NC_HPI_DECODE_LOAD\n" ));
 			break;
-
+#endif
 		case NC_HPIBOOTLOAD:
 			KdPrint((" NC_HPI_BOOT_LOAD\n" ));
 

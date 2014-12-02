@@ -15,7 +15,10 @@ extern "C"
 }
 #endif 
 
-
+#define INTERRUPT_INCLUDE
+#define PCI9052_MEMINCLUDE
+//#define PCI9052_IOINCLUDE
+//#define  DECODE_INCLUDE
 
 #include <initguid.h> 
 
@@ -41,11 +44,33 @@ typedef struct _DEVICE_EXTENSION
 	PULONG pHPIDIncrease;						  
 	PULONG pHPIDStatic;
 
-	HANDLE hUserDecodeEvent;                      //用户层译码线程句柄
-	PKEVENT pDecodeEvent;                         //用于对译码线程进行同步的内核事件
-	
+	//PCI9052内部寄存器映射的内存资源
+#ifdef PCI9052_MEMINCLUDE
+	const static ULONG ulPCI9052MemLen = 0x0080;
+	PULONG pPCI9052Mem;
+#endif
+
+#ifdef PCI9052_IOINCLUDE
+	const static ULONG ulPCI9052IOLen = 0x0080;
+	PULONG pPCI9052IO;
+	BOOLEAN mappedport;
+#endif
+
+	signed long			UsageCount;				//The pending I/O Count
+	BOOLEAN				bStopping;			
+	KEVENT				StoppingEvent;			// Set when all pending I/O complete
+	BOOLEAN				GotResource;			//
+	//事件对象指针
+	PKEVENT				pWaitEvent;
+	BOOLEAN				bSetWaitEvent;
+
+#ifdef DECODE_INCLUDE
+	HANDLE hUserDecodeEvent;                //用户层译码线程句柄
+	PKEVENT pDecodeEvent;                   //用于对译码线程进行同步的内核事件
 	HANDLE hSysThread;                      //内核空间译码线程句柄
 	KEVENT DecodeEvent;                     //用于对译码线程进行同步的内核事件
+#endif
+
 	PUCHAR pParaShm;                        //用于在用户空间和内核空间相互传递参数用的共享内存区基地址
 	ULONG ulParaShmLen;                     //用于在用户空间和内核空间相互传递参数用的共享内存区长度，由用户层程序传来，建议为0x100长度
 	BOOLEAN bParaShmCreat;                  //用于标志共享内存建立与否，这样可以在驱动层次上防止无效地址的访问
