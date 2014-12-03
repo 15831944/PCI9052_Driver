@@ -18,7 +18,7 @@ extern "C"
 #define INTERRUPT_INCLUDE
 #define PCI9052_MEMINCLUDE
 //#define PCI9052_IOINCLUDE
-//#define  DECODE_INCLUDE
+#define  DECODE_INCLUDE
 
 #include <initguid.h> 
 
@@ -34,9 +34,6 @@ typedef struct _DEVICE_EXTENSION
 	PDEVICE_OBJECT fdo;                     //指明设备接口所关联的设备对象，在此是指功能设备对象
 	PDEVICE_OBJECT NextStackDevice;         //保存下层驱动对象
 	UNICODE_STRING InterfaceName;           //保存由设备接口生成的设备符号链接名，由IoRegisterDeviceInterface函数完成
-
-	UCHAR uPnpStateFlag;                     //PNP状态机标志位，用以管理ＮＣ板的即插即用状态：0＝不存在　1＝存在但停止　2＝存在且正常工作　3＝等待删除　4＝等待停止　转换图见Ｐ374
-	PKINTERRUPT InterruptObject;			// address of interrupt object
 
 	const static ULONG ulHPILen=0x0010;	
 	PULONG pHPIC;										
@@ -56,6 +53,17 @@ typedef struct _DEVICE_EXTENSION
 	BOOLEAN mappedport;
 #endif
 
+#ifdef DECODE_INCLUDE
+	HANDLE hUserDecodeEvent;                //用户层译码线程句柄
+	PKEVENT pDecodeEvent;                   //用于对译码线程进行同步的内核事件
+	HANDLE hSysThread;                      //内核空间译码线程句柄
+	KEVENT DecodeEvent;                     //用于对译码线程进行同步的内核事件
+#endif
+
+#ifdef INTERRUPT_INCLUDE
+	PKINTERRUPT InterruptObject;			// address of interrupt object
+#endif
+
 	signed long			UsageCount;				//The pending I/O Count
 	BOOLEAN				bStopping;			
 	KEVENT				StoppingEvent;			// Set when all pending I/O complete
@@ -64,13 +72,7 @@ typedef struct _DEVICE_EXTENSION
 	PKEVENT				pWaitEvent;
 	BOOLEAN				bSetWaitEvent;
 
-#ifdef DECODE_INCLUDE
-	HANDLE hUserDecodeEvent;                //用户层译码线程句柄
-	PKEVENT pDecodeEvent;                   //用于对译码线程进行同步的内核事件
-	HANDLE hSysThread;                      //内核空间译码线程句柄
-	KEVENT DecodeEvent;                     //用于对译码线程进行同步的内核事件
-#endif
-
+	UCHAR uPnpStateFlag;                     //PNP状态机标志位，用以管理ＮＣ板的即插即用状态：0＝不存在　1＝存在但停止　2＝存在且正常工作　3＝等待删除　4＝等待停止　转换图见Ｐ374
 	PUCHAR pParaShm;                        //用于在用户空间和内核空间相互传递参数用的共享内存区基地址
 	ULONG ulParaShmLen;                     //用于在用户空间和内核空间相互传递参数用的共享内存区长度，由用户层程序传来，建议为0x100长度
 	BOOLEAN bParaShmCreat;                  //用于标志共享内存建立与否，这样可以在驱动层次上防止无效地址的访问

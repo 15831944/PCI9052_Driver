@@ -451,6 +451,7 @@ NTSTATUS InitNCBoard(IN PDEVICE_EXTENSION pdx,IN PCM_PARTIAL_RESOURCE_LIST list)
 				gotmem1 = TRUE;
 				//初始化HPI控制寄存器HWOB
 				WRITE_REGISTER_ULONG((PULONG)pdx->pHPIC,0X00010001);
+				KdPrint((" HPIC_back %X\n",(PULONG)READ_REGISTER_ULONG((PULONG)pdx->pHPIC)));
 			}
 #ifdef PCI9052_MEMINCLUDE
 			else if (resource->u.Memory.Length == pdx->ulPCI9052MemLen)
@@ -458,7 +459,13 @@ NTSTATUS InitNCBoard(IN PDEVICE_EXTENSION pdx,IN PCM_PARTIAL_RESOURCE_LIST list)
 				KdPrint(("PCI9052Mem BASE ADDRESS X%X\n",resource->u.Memory.Start));
 				pdx->pPCI9052Mem = (PULONG)MmMapIoSpace(resource->u.Memory.Start,resource->u.Memory.Length,MmNonCached);
 				gotmem2 = TRUE;
-					
+				
+				//可以选择这里要不要进行一下中断的屏蔽
+				//RegisterValue &= (~0x40);
+				//WRITE_REGISTER_ULONG((PULONG)pdx->pPCI9052Mem + 0x4c/4,RegisterValue);   //屏蔽中断
+				//RegisterValue |= 0x400;
+				//WRITE_REGISTER_ULONG((PULONG)pdx->pPCI9052Mem + 0x4c/4,RegisterValue);   //清零中断事件
+			
 				// Read interrupt status register 事实证明偏移地址要除4
 				//KdPrint(("The content of PCI9052Mem is %x \n",READ_REGISTER_ULONG(pdx->pPCI9052Mem + 0x2c/4)));
 				
@@ -749,9 +756,10 @@ NTSTATUS NCDriverStopDevice(PDEVICE_EXTENSION pdx, PIRP Irp)
 	IoSetDeviceInterfaceState(&pdx->InterfaceName, FALSE);
 	//释放存放设备接口符号链接名（本链接存放在动态申请的内存中）
 	RtlFreeUnicodeString(&pdx->InterfaceName);
-	//断开中断连接，不在响应PCI中断                        
+	//断开中断连接，不在响应PCI中断 
+#ifdef INTERRUPT_INCLUDE
 	IoDisconnectInterrupt(pdx->InterruptObject);
-
+#endif
 	pdx->uPnpStateFlag=1;
 	//表明共享内存尚未建立，此时不允许对共享内存区进行读写操作
 	pdx->bParaShmCreat=FALSE;
@@ -939,7 +947,7 @@ void C6x_Write_Word(PULONG Hpic_adr,PULONG Hpia_adr,PULONG Hpid_Noincrement_adr,
 	WRITE_REGISTER_ULONG((PULONG)Hpia_adr,Source_adr);
 	val1 = READ_REGISTER_ULONG((PULONG)Hpid_Noincrement_adr);
 	
-	while((val1&0xfff) != (Source_data&0xfff))
+	while((val1&0xffff) != (Source_data&0xffff))
 	{
 		WRITE_REGISTER_ULONG(Hpic_adr,0x00010001);
 		WRITE_REGISTER_ULONG((PULONG)Hpia_adr,Source_adr);
@@ -1045,7 +1053,7 @@ void C6x_Read_Increament_Section(PULONG Hpic_adr,PULONG Hpia_adr,PULONG Hpid_inc
 {
 	PAGED_CODE();
 	ULONG i;
-
+	//感觉这里的自增模式读有问题，应该像上面自增模式写一样，写HPIC、HPIA后，循环HPID读,最后固定地址读
 	for(i=0; i<16; i++)
 	{
 		WRITE_REGISTER_ULONG(Hpic_adr,0x00010001);
@@ -1151,21 +1159,21 @@ NTSTATUS NCDriverDeviceControl(PDEVICE_OBJECT fdo, PIRP Irp)
 			pInBuf = (LP_NC_FPGA_stru)Irp->AssociatedIrp.SystemBuffer;
 
 			WRITE_REGISTER_ULONG((PULONG)pdx->pHPIC,0x00010001);
-			WRITE_REGISTER_ULONG((PULONG)adrAdr,DSP_TAPEPARAMETER_BASE_ADR+pInBuf->adr);
+			WRITE_REGISTER_ULONG((PULONG)adrAdr,DSP_PARAMETER_BASE_ADR+pInBuf->adr);
 			WRITE_REGISTER_ULONG((PULONG)dataNoIncrementAdr,pInBuf->val&0xffff);
 
 			WRITE_REGISTER_ULONG((PULONG)pdx->pHPIC,0x00110011);
-			WRITE_REGISTER_ULONG((PULONG)adrAdr,DSP_TAPEPARAMETER_BASE_ADR+pInBuf->adr);
+			WRITE_REGISTER_ULONG((PULONG)adrAdr,DSP_PARAMETER_BASE_ADR+pInBuf->adr);
 			val1 = READ_REGISTER_ULONG((PULONG)dataNoIncrementAdr)&0xffff;
 
 			while(val1 != ((pInBuf->val)&0xffff))
 			{
 				WRITE_REGISTER_ULONG((PULONG)pdx->pHPIC,0x00010001);
-				WRITE_REGISTER_ULONG((PULONG)adrAdr,DSP_TAPEPARAMETER_BASE_ADR+pInBuf->adr);
+				WRITE_REGISTER_ULONG((PULONG)adrAdr,DSP_PARAMETER_BASE_ADR+pInBuf->adr);
 				WRITE_REGISTER_ULONG((PULONG)dataNoIncrementAdr,pInBuf->val&0xffff);
 
 				WRITE_REGISTER_ULONG((PULONG)pdx->pHPIC,0x00110011);
-				WRITE_REGISTER_ULONG((PULONG)adrAdr,DSP_TAPEPARAMETER_BASE_ADR+pInBuf->adr);
+				WRITE_REGISTER_ULONG((PULONG)adrAdr,DSP_PARAMETER_BASE_ADR+pInBuf->adr);
 				val1 = READ_REGISTER_ULONG((PULONG)dataNoIncrementAdr)&0xffff;
 
 				j++;
@@ -1195,9 +1203,14 @@ NTSTATUS NCDriverDeviceControl(PDEVICE_OBJECT fdo, PIRP Irp)
 #ifdef DECODE_INCLUDE
 		case NC_TRANSMIT_EVENT:
 			KdPrint(("get into event test\n"));
+			//设置PCI9052的INTCSR的PCI和LINTi1中断有效
+			WRITE_REGISTER_ULONG((ULONG)pdx->pPCI9052Mem + 0x4c/4, 0x41);
+
 			pdx->hUserDecodeEvent = *(HANDLE*)Irp->AssociatedIrp.SystemBuffer;
+			//ObReferenceObjectByHandle函数可以理解为将输入的一参数转换为输出的倒数二参数
 			status = ObReferenceObjectByHandle(pdx->hUserDecodeEvent, EVENT_MODIFY_STATE,
 				*ExEventObjectType, KernelMode, (PVOID*) &pdx->pDecodeEvent, NULL);
+			// ObDereferenceObject(pdx->pDecodeEvent);	//与上一函数对应
 			break;
 
 		case NC_HPI_DECODE_LOAD:
