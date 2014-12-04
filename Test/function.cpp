@@ -80,14 +80,14 @@ int Load_NC_TapeParameter_Program(HANDLE handle,LPVOID offset,UCHAR *buff,ULONG 
 	return 0;
 }
 
-int DspMemRead(HANDLE handle,LPVOID offset,LPVOID buff,ULONG length)
+int DspMemRead(HANDLE handle,LPVOID inaddr,LPVOID buff,ULONG length)
 {
 	BOOL bResult;
 	DWORD junk; 
 
 	bResult = DeviceIoControl(handle,  // device to be queried
 		DSP_MEMORY_READ,		// operation to perform
-		offset,					// input buffer
+		inaddr,					// input buffer
 		4,						// input buffer bytes
 		buff,					// output buffer
 		length,						// output buffer bytes

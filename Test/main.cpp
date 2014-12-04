@@ -10,7 +10,7 @@
 int main()
 {
 	int TapePara[4] = {1,2,3,4};
-	int MemRead[4];
+	int MemRead[100];
 	int ReadAddr;
 	HANDLE hDevice = GetDeviceViaInterface((LPGUID)&NCCtrlDevice,0);
 
@@ -26,9 +26,9 @@ int main()
 	Load_NC_TapeParameter_Program(hDevice,TapePara,NULL,16);
 	printf("Writing Completed\n");
 
-	//ReadAddr = 0xa00104c8;
-	//DspMemRead(hDevice,&ReadAddr,MemRead,16);
-	//printf("Reading Completed, the data is:%x,%x,%x,%x\n",MemRead[0],MemRead[1],MemRead[2],MemRead[3]);
+	ReadAddr = 0xa00104c8;
+	DspMemRead(hDevice,&ReadAddr,MemRead,400);
+	printf("Reading Completed, the data is:%x,%x,%x,%x\n",MemRead[0],MemRead[1],MemRead[2],MemRead[3]);
 
 	CloseHandle(hDevice);
 	getchar();

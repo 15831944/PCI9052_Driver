@@ -1204,7 +1204,7 @@ NTSTATUS NCDriverDeviceControl(PDEVICE_OBJECT fdo, PIRP Irp)
 		case NC_TRANSMIT_EVENT:
 			KdPrint(("get into event test\n"));
 			//设置PCI9052的INTCSR的PCI和LINTi1中断有效
-			WRITE_REGISTER_ULONG((ULONG)pdx->pPCI9052Mem + 0x4c/4, 0x41);
+			WRITE_REGISTER_ULONG((PULONG)pdx->pPCI9052Mem + 0x4c/4, 0x41);
 
 			pdx->hUserDecodeEvent = *(HANDLE*)Irp->AssociatedIrp.SystemBuffer;
 			//ObReferenceObjectByHandle函数可以理解为将输入的一参数转换为输出的倒数二参数
